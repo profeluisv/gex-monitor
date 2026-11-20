@@ -1,4 +1,4 @@
-# GEX MONITOR v14 - GitHub Actions + Telegram (envío cada hora a las :30)
+# GEX MONITOR v14 - GitHub Actions + Telegram
 import re
 import sys
 import time
@@ -16,12 +16,6 @@ TARGET_DTE = 1
 TOKEN = "8624586813:AAE3Vvh-ic3WIddMJI-b4X2QF6Ii8AP2VD4"
 CHAT_ID = "@gex_monitor"
 ENVIAR_SOLO_EN_SESION = True
-
-# Programación de envíos (hora NY)
-MINUTO_ENVIO = 30          # 9:30, 10:30, 11:30, ...
-TOLERANCIA_MIN = 10        # si arranca tarde, aún envía el slot hasta 10 min después
-ANTICIPO_MAX_MIN = 90      # si arranca más de 90 min antes del primer slot, termina
-HORA_CORTE_TRAMO = 13      # tramo "manana": slots antes de las 13:00 | "tarde": desde las 13:00
 
 NYSE_TZ = "America/New_York"
 MULT_CONTRATO = 100
@@ -388,95 +382,33 @@ def enviar_telegram(mensaje, reintentos=3):
             return False
     return True
 
-def ejecutar_ciclo(ahora_ny):
-    try:
-        resultados = []
-        for idx, t in enumerate(TICKERS):
-            res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
-            if res is not None:
-                resultados.append(res)
-            if idx < len(TICKERS) - 1:
-                time.sleep(1.5)
-
-        if not resultados:
-            log("Sin resultados válidos de Cboe.")
-            return
-
-        mensaje = formatear_mensaje(resultados, ahora_ny)
-        if mensaje and enviar_telegram(mensaje):
-            log(f"Reporte enviado a {CHAT_ID} ({len(resultados)} tickers).")
-    except Exception as e:
-        log(f"Error inesperado en el ciclo: {e}")
-
-def slots_de_hoy(ahora, abre, cierra, tramo):
-    """Slots a las 9:30, 10:30, ... mientras sean anteriores al cierre."""
-    slots = []
-    s = abre.replace(minute=MINUTO_ENVIO)
-    while s < cierra:
-        if tramo == "manana" and s.hour >= HORA_CORTE_TRAMO:
-            break
-        if tramo == "tarde" and s.hour < HORA_CORTE_TRAMO:
-            s += pd.Timedelta(hours=1)
-            continue
-        slots.append(s)
-        s += pd.Timedelta(hours=1)
-    return slots
-
 def main():
     forzar = "--forzar" in sys.argv
-    tramo = "todo"
-    if "--tramo" in sys.argv:
-        tramo = sys.argv[sys.argv.index("--tramo") + 1]
-
     ahora_ny = pd.Timestamp.now(tz=NYSE_TZ)
+    estado = estado_sesion(ahora_ny)
 
-    # Modo puntual (manual)
-    if "--loop" not in sys.argv:
-        estado = estado_sesion(ahora_ny)
-        if ENVIAR_SOLO_EN_SESION and estado != "sesion" and not forzar:
-            log(f"Sesión NY en estado '{estado}'. Se omite envío.")
-            return
-        ejecutar_ciclo(ahora_ny)
+    if ENVIAR_SOLO_EN_SESION and estado != "sesion" and not forzar:
+        log(f"Sesión NY en estado '{estado}'. Se omite envío.")
         return
 
-    # Modo bucle
-    ahora, abre, cierra = horario_hoy(ahora_ny)
-    if abre is None:
-        log("Hoy no hay sesión NYSE. Fin.")
-        return
+    resultados = []
+    for idx, t in enumerate(TICKERS):
+        res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
+        if res is not None:
+            resultados.append(res)
+        if idx < len(TICKERS) - 1:
+            time.sleep(1.5)
 
-    slots = slots_de_hoy(ahora, abre, cierra, tramo)
-    pendientes = [s for s in slots if ahora <= s + pd.Timedelta(minutes=TOLERANCIA_MIN)]
-    if not pendientes:
-        log(f"Sin slots pendientes en el tramo '{tramo}'. Fin.")
-        return
-    if ahora < pendientes[0] - pd.Timedelta(minutes=ANTICIPO_MAX_MIN):
-        log("Arranque demasiado temprano para este tramo. Fin.")
-        return
+    if not resultados:
+        log("Sin resultados válidos de Cboe.")
+        sys.exit(1)
 
-    log(f"Bucle '{tramo}'. Slots: {[f'{s:%H:%M}' for s in pendientes]}")
-    while pendientes:
-        ahora = pd.Timestamp.now(tz=NYSE_TZ)
-        if estado_sesion(ahora) == "cierre":
-            log("Sesión cerrada. Fin.")
-            return
-
-        for s in [s for s in pendientes if ahora > s + pd.Timedelta(minutes=TOLERANCIA_MIN)]:
-            log(f"Slot {s:%H:%M} vencido. Se omite.")
-            pendientes.remove(s)
-        if not pendientes:
-            break
-
-        proximo = pendientes[0]
-        if ahora >= proximo:
-            log(f"Ejecutando slot {proximo:%H:%M}")
-            ejecutar_ciclo(ahora)
-            pendientes.remove(proximo)
-        else:
-            espera = (proximo - ahora).total_seconds()
-            time.sleep(min(20, max(1, espera)))
-
-    log(f"Tramo '{tramo}' completado. Fin.")
+    mensaje = formatear_mensaje(resultados, ahora_ny)
+    if mensaje and enviar_telegram(mensaje):
+        log(f"Reporte enviado a {CHAT_ID} ({len(resultados)} tickers).")
+    else:
+        log("No se pudo enviar el reporte a Telegram.")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
