@@ -1,4 +1,4 @@
-# GEX MONITOR v11 - GitHub Actions + Telegram
+# GEX MONITOR v12 - GitHub Actions + Telegram
 import re
 import sys
 import time
@@ -416,7 +416,7 @@ def formatear_mensaje(resultados, ahora_ny):
     if not resultados:
         return None
     lineas = [
-        "<b>GEX Monitor</b>",
+        "<b>GEX Monitor v12</b>",
         f"Día: {ahora_ny:%Y-%m-%d}",
         f"Hora: {ahora_ny:%H:%M} NY",
         "",
