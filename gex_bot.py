@@ -415,20 +415,34 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
 def formatear_mensaje(resultados, ahora_ny):
     if not resultados:
         return None
-    lineas = [f"📊 GEX MONITOR v11 | {ahora_ny:%Y-%m-%d %H:%M} NY", ""]
+    lineas = [
+        "<b>GEX Monitor</b>",
+        f"Día: {ahora_ny:%Y-%m-%d}",
+        f"Hora: {ahora_ny:%H:%M} NY",
+        "",
+    ]
     for r in resultados:
         cw = f"${r['call_wall']:.2f}" if r["call_wall"] is not None else "N/A"
         pw = f"${r['put_wall']:.2f}" if r["put_wall"] is not None else "N/A"
-        fl = f"${r['flip']:.2f} ({(r['spot'] / r['flip'] - 1) * 100:+.1f}%)" if r["flip"] is not None else "N/A"
+        fl = f"${r['flip']:.2f}" if r["flip"] is not None else "N/A"
         gex_m = r["net_gex"] / 1_000_000
-        ico = "🟢" if r["net_gex"] > 0 else ("🔴" if r["net_gex"] < 0 else "⚪")
-        hora_txt = r["ts_dato"].strftime("%H:%M") if r["ts_dato"] is not None else "--:--"
+        if r["net_gex"] > 0:
+            gamma_txt = "🟢 Gamma positivo"
+        elif r["net_gex"] < 0:
+            gamma_txt = "🔴 Gamma negativo"
+        else:
+            gamma_txt = "⚪ Gamma neutro"
+
         lineas.append(
-            f"{ico} {r['ticker']} ({r['dte']} DTE) | Spot: ${r['spot']:.2f} [{hora_txt} NY]\n"
-            f"   CW: {cw} | PW: {pw} | Flip: {fl}\n"
-            f"   Net GEX: {gex_m:+.1f}M | {r['estrategia']} ({r['nota']})"
+            f"<b>Ticker: {r['ticker']}</b>\n"
+            f"DTE: {r['dte']}\n"
+            f"Call wall: {cw}\n"
+            f"Put wall: {pw}\n"
+            f"Flip: {fl}\n"
+            f"Net GEX: {gex_m:+.1f}M\n"
+            f"{gamma_txt}\n"
         )
-    return "\n".join(lineas)
+    return "\n".join(lineas).strip()
 
 def enviar_telegram(mensaje, reintentos=3):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -436,7 +450,11 @@ def enviar_telegram(mensaje, reintentos=3):
         enviado = False
         for i in range(reintentos):
             try:
-                r = requests.post(url, json={"chat_id": CHAT_ID, "text": parte, "disable_web_page_preview": True}, timeout=20)
+                r = requests.post(
+                    url,
+                    json={"chat_id": CHAT_ID, "text": parte, "parse_mode": "HTML", "disable_web_page_preview": True},
+                    timeout=20,
+                )
                 r.raise_for_status()
                 enviado = True
                 break
