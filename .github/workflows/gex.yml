@@ -2,28 +2,57 @@ name: GEX Monitor NY
 
 on:
   schedule:
-    - cron: '35 13-20 * * 1-5'
+    # Arranques de respaldo, cubren horario de verano (EDT) e invierno (EST)
+    - cron: '43 12 * * 1-5'
+    - cron: '3 13 * * 1-5'
+    - cron: '23 13 * * 1-5'
+    - cron: '43 13 * * 1-5'
+    - cron: '3 14 * * 1-5'
+    - cron: '23 14 * * 1-5'
   workflow_dispatch:
+    inputs:
+      forzar:
+        description: Enviar ya, aunque esté fuera de sesión
+        type: boolean
+        default: false
+
+concurrency:
+  group: gex-${{ github.event.inputs.forzar == 'true' && 'manual' || 'loop' }}
+  cancel-in-progress: false
 
 jobs:
-  run-gex:
+  manana:
+    if: github.event.inputs.forzar != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 330
     steps:
-      - name: Descargar repositorio
-        uses: actions/checkout@v4
-
-      - name: Configurar Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - run: pip install numpy pandas requests curl_cffi
+      - run: python gex_bot.py --loop --tramo manana
 
-      - name: Instalar dependencias
-        run: pip install numpy pandas requests curl_cffi
+  tarde:
+    needs: manana
+    if: ${{ always() && github.event.inputs.forzar != 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install numpy pandas requests curl_cffi
+      - run: python gex_bot.py --loop --tramo tarde
 
-      - name: Ejecutar GEX Monitor
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            python gex_bot.py --forzar
-          else
-            python gex_bot.py
-          fi
+  manual:
+    if: github.event.inputs.forzar == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install numpy pandas requests curl_cffi
+      - run: python gex_bot.py --forzar
