@@ -1,4 +1,4 @@
-# GEX MONITOR v13 - GitHub Actions + Telegram
+# GEX MONITOR v14 - GitHub Actions + Telegram (envío cada hora a las :30)
 import re
 import sys
 import time
@@ -17,11 +17,15 @@ TOKEN = "8624586813:AAE3Vvh-ic3WIddMJI-b4X2QF6Ii8AP2VD4"
 CHAT_ID = "@gex_monitor"
 ENVIAR_SOLO_EN_SESION = True
 
+# Programación de envíos (hora NY)
+MINUTO_ENVIO = 30          # 9:30, 10:30, 11:30, ...
+TOLERANCIA_MIN = 10        # si arranca tarde, aún envía el slot hasta 10 min después
+ANTICIPO_MAX_MIN = 90      # si arranca más de 90 min antes del primer slot, termina
+HORA_CORTE_TRAMO = 13      # tramo "manana": slots antes de las 13:00 | "tarde": desde las 13:00
+
 NYSE_TZ = "America/New_York"
 MULT_CONTRATO = 100
 PCT_MOV = 0.01
-FILTRO_PROXIMIDAD = 0.015
-MARGEN_RUPTURA = 0.005
 OCC_REGEX = re.compile(r"^(?P<root>[A-Z]{1,6}\d?)(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$")
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -134,22 +138,6 @@ def _num(x):
     except (TypeError, ValueError):
         return None
 
-def _fecha(valor):
-    if valor is None:
-        return None
-    try:
-        return datetime.fromisoformat(str(valor).strip().replace("Z", "")).date()
-    except ValueError:
-        return None
-
-def fecha_datos(payload, options):
-    for c in (payload.get("timestamp"), payload["data"].get("last_trade_time")):
-        f = _fecha(c)
-        if f:
-            return f
-    fechas = [f for f in (_fecha(o.get("last_trade_time")) for o in options) if f]
-    return max(fechas) if fechas else None
-
 def horario_hoy(ahora):
     ahora = pd.Timestamp(ahora)
     if ahora.tzinfo is None:
@@ -172,24 +160,6 @@ def estado_sesion(ahora):
         return "sesion"
     return "cierre"
 
-def hora_dato(payload):
-    trades = [o.get("last_trade_time") for o in payload["data"]["options"]]
-    trades = [t for t in trades if isinstance(t, str) and t.strip()]
-    candidatos = []
-    if trades:
-        candidatos.append((max(trades), NYSE_TZ))
-    candidatos += [(payload.get("timestamp"), "UTC"), (payload["data"].get("last_trade_time"), "UTC")]
-    for valor, zona in candidatos:
-        try:
-            t = pd.Timestamp(valor)
-        except (ValueError, TypeError):
-            continue
-        if pd.isna(t):
-            continue
-        t = t.tz_localize(zona) if t.tzinfo is None else t
-        return t.tz_convert(NYSE_TZ)
-    return None
-
 def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     ticker = ticker.upper()
     if payload is None:
@@ -205,10 +175,6 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
 
     ahora = ahora if ahora is not None else pd.Timestamp.now(tz=NYSE_TZ)
     hoy = ahora.date()
-    _, abre, _ = horario_hoy(ahora)
-    estado = estado_sesion(ahora)
-    f_datos = fecha_datos(payload, options)
-    ts_dato = hora_dato(payload)
 
     exp_cache = {}
     parsed = []
@@ -300,7 +266,6 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     gp = -gex_k_put
     call_wall = None
     put_wall = None
-    muros_inconsistentes = False
 
     if gc.max() > 0 and gp.max() > 0:
         ic = int(np.argmax(gc))
@@ -321,8 +286,6 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
                     mejor = cand
             if mejor is not None:
                 call_wall, put_wall = mejor[1], mejor[2]
-            else:
-                muros_inconsistentes = True
     else:
         call_wall = float(ks[np.argmax(gc)]) if gc.max() > 0 else None
         put_wall = float(ks[np.argmax(gp)]) if gp.max() > 0 else None
@@ -365,58 +328,17 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
         if raices:
             flip = float(min(raices, key=lambda x: abs(x - spot)))
 
-    if net_gex > 0:
-        regimen = "GAMMA POSITIVO (Amortiguación)"
-    elif net_gex < 0:
-        regimen = "GAMMA NEGATIVO (Amplificación)"
-    else:
-        regimen = "GAMMA NEUTRO"
-
-    estrategia, nota = "ESPERAR", "Datos insuficientes (muros o Gamma Flip)"
-    if muros_inconsistentes:
-        estrategia, nota = "ESPERAR", "Muros inconsistentes"
-    elif call_wall is not None and put_wall is not None and flip is not None:
-        dist_call = abs(call_wall - spot)
-        dist_put = abs(spot - put_wall)
-        if (dist_put / spot > FILTRO_PROXIMIDAD) and (dist_call / spot > FILTRO_PROXIMIDAD):
-            estrategia, nota = "ESPERAR", "Precio lejos de los muros"
-        else:
-            if net_gex > 0 and spot > flip:
-                if spot > call_wall:
-                    estrategia, nota = "VENDER", "~Resistencia - Rechazo"
-                elif spot < put_wall:
-                    estrategia, nota = "COMPRAR", "~Soporte - Rebote"
-                else:
-                    estrategia, nota = ("COMPRAR", "~Soporte - Rebote") if dist_put <= dist_call else ("VENDER", "~Resistencia - Rechazo")
-            elif net_gex < 0 and spot < flip:
-                margen_ruptura_put = (put_wall - spot) / spot
-                margen_ruptura_call = (spot - call_wall) / spot
-                if spot > call_wall:
-                    estrategia, nota = ("VIGILAR", "~Resistencia - Ruptura al alza") if margen_ruptura_call < MARGEN_RUPTURA else ("COMPRAR", "~Resistencia - Ruptura al alza")
-                elif spot < put_wall:
-                    estrategia, nota = ("VIGILAR", "~Soporte - Ruptura a la baja") if margen_ruptura_put < MARGEN_RUPTURA else ("VENDER", "~Soporte - Ruptura a la baja")
-                else:
-                    estrategia, nota = ("VIGILAR", "~Soporte - Ruptura a la baja") if dist_put <= dist_call else ("VIGILAR", "~Resistencia - Ruptura al alza")
-            else:
-                estrategia, nota = "ESPERAR", "Régimen no alineado"
-
-    dato_viejo = (ts_dato < abre) if (ts_dato is not None and abre is not None) else (f_datos is not None and f_datos != hoy)
-    if estado in ("cierre", "pre"):
-        estrategia, nota = "ESPERAR", "Fuera de sesión NY"
-    elif estado == "sesion" and dato_viejo:
-        estrategia, nota = "ESPERAR", "Datos de Cboe no son de hoy"
-
     return {
-        "ticker": ticker, "dte": rango_dte, "spot": spot, "ts_dato": ts_dato,
+        "ticker": ticker, "dte": rango_dte, "spot": spot,
         "call_wall": call_wall, "put_wall": put_wall, "flip": flip,
-        "net_gex": net_gex, "regimen": regimen, "estrategia": estrategia, "nota": nota,
+        "net_gex": net_gex,
     }
 
 def formatear_mensaje(resultados, ahora_ny):
     if not resultados:
         return None
     lineas = [
-        "<b>GEX Monitor v13</b>",
+        "<b>GEX Monitor v14</b>",
         f"Día: {ahora_ny:%Y-%m-%d}",
         f"Hora: {ahora_ny:%H:%M} NY",
         "",
@@ -466,30 +388,95 @@ def enviar_telegram(mensaje, reintentos=3):
             return False
     return True
 
+def ejecutar_ciclo(ahora_ny):
+    try:
+        resultados = []
+        for idx, t in enumerate(TICKERS):
+            res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
+            if res is not None:
+                resultados.append(res)
+            if idx < len(TICKERS) - 1:
+                time.sleep(1.5)
+
+        if not resultados:
+            log("Sin resultados válidos de Cboe.")
+            return
+
+        mensaje = formatear_mensaje(resultados, ahora_ny)
+        if mensaje and enviar_telegram(mensaje):
+            log(f"Reporte enviado a {CHAT_ID} ({len(resultados)} tickers).")
+    except Exception as e:
+        log(f"Error inesperado en el ciclo: {e}")
+
+def slots_de_hoy(ahora, abre, cierra, tramo):
+    """Slots a las 9:30, 10:30, ... mientras sean anteriores al cierre."""
+    slots = []
+    s = abre.replace(minute=MINUTO_ENVIO)
+    while s < cierra:
+        if tramo == "manana" and s.hour >= HORA_CORTE_TRAMO:
+            break
+        if tramo == "tarde" and s.hour < HORA_CORTE_TRAMO:
+            s += pd.Timedelta(hours=1)
+            continue
+        slots.append(s)
+        s += pd.Timedelta(hours=1)
+    return slots
+
 def main():
     forzar = "--forzar" in sys.argv
+    tramo = "todo"
+    if "--tramo" in sys.argv:
+        tramo = sys.argv[sys.argv.index("--tramo") + 1]
+
     ahora_ny = pd.Timestamp.now(tz=NYSE_TZ)
-    estado = estado_sesion(ahora_ny)
 
-    if ENVIAR_SOLO_EN_SESION and estado != "sesion" and not forzar:
-        log(f"Sesión NY en estado '{estado}'. Se omite envío.")
+    # Modo puntual (manual)
+    if "--loop" not in sys.argv:
+        estado = estado_sesion(ahora_ny)
+        if ENVIAR_SOLO_EN_SESION and estado != "sesion" and not forzar:
+            log(f"Sesión NY en estado '{estado}'. Se omite envío.")
+            return
+        ejecutar_ciclo(ahora_ny)
         return
 
-    resultados = []
-    for idx, t in enumerate(TICKERS):
-        res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
-        if res is not None:
-            resultados.append(res)
-        if idx < len(TICKERS) - 1:
-            time.sleep(1.5)
-
-    if not resultados:
-        log("Sin resultados válidos de Cboe.")
+    # Modo bucle
+    ahora, abre, cierra = horario_hoy(ahora_ny)
+    if abre is None:
+        log("Hoy no hay sesión NYSE. Fin.")
         return
 
-    mensaje = formatear_mensaje(resultados, ahora_ny)
-    if mensaje and enviar_telegram(mensaje):
-        log(f"Reporte enviado a {CHAT_ID} ({len(resultados)} tickers).")
+    slots = slots_de_hoy(ahora, abre, cierra, tramo)
+    pendientes = [s for s in slots if ahora <= s + pd.Timedelta(minutes=TOLERANCIA_MIN)]
+    if not pendientes:
+        log(f"Sin slots pendientes en el tramo '{tramo}'. Fin.")
+        return
+    if ahora < pendientes[0] - pd.Timedelta(minutes=ANTICIPO_MAX_MIN):
+        log("Arranque demasiado temprano para este tramo. Fin.")
+        return
+
+    log(f"Bucle '{tramo}'. Slots: {[f'{s:%H:%M}' for s in pendientes]}")
+    while pendientes:
+        ahora = pd.Timestamp.now(tz=NYSE_TZ)
+        if estado_sesion(ahora) == "cierre":
+            log("Sesión cerrada. Fin.")
+            return
+
+        for s in [s for s in pendientes if ahora > s + pd.Timedelta(minutes=TOLERANCIA_MIN)]:
+            log(f"Slot {s:%H:%M} vencido. Se omite.")
+            pendientes.remove(s)
+        if not pendientes:
+            break
+
+        proximo = pendientes[0]
+        if ahora >= proximo:
+            log(f"Ejecutando slot {proximo:%H:%M}")
+            ejecutar_ciclo(ahora)
+            pendientes.remove(proximo)
+        else:
+            espera = (proximo - ahora).total_seconds()
+            time.sleep(min(20, max(1, espera)))
+
+    log(f"Tramo '{tramo}' completado. Fin.")
 
 if __name__ == "__main__":
     main()
