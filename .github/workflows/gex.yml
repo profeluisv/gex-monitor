@@ -1,0 +1,29 @@
+name: GEX Monitor NY
+
+on:
+  schedule:
+    - cron: '30 13-20 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  run-gex:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install numpy pandas requests curl_cffi
+
+      - name: Ejecutar GEX Monitor
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            python gex_bot.py --forzar
+          else
+            python gex_bot.py
+          fi
