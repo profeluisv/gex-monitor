@@ -2,7 +2,7 @@ name: GEX Monitor NY
 
 on:
   schedule:
-    - cron: '30 13-20 * * 1-5'
+    - cron: '40 13-20 * * 1-5'
   workflow_dispatch:
 
 jobs:
