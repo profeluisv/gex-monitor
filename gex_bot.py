@@ -1,7 +1,8 @@
-# GEX MONITOR v14 - GitHub Actions + Telegram
+# GEX MONITOR - GitHub Actions + Telegram (Integración V12 - Net GEX en Muros)
 import re
 import sys
 import time
+import os
 from datetime import datetime, date, timedelta
 from statistics import NormalDist
 
@@ -13,8 +14,9 @@ from curl_cffi import requests as cffi_requests
 # Configuración
 TICKERS = ["SPY", "QQQ", "GLD", "USO", "IBIT"]
 TARGET_DTE = 1
-TOKEN = "8624586813:AAE3Vvh-ic3WIddMJI-b4X2QF6Ii8AP2VD4"
-CHAT_ID = "@gex_monitor"
+# SEGURIDAD: Usar variable de entorno en GitHub, con fallback para pruebas locales
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8624586813:AAE3Vvh-ic3WIddMJI-b4X2QF6Ii8AP2VD4")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "@gex_monitor")
 ENVIAR_SOLO_EN_SESION = True
 
 NYSE_TZ = "America/New_York"
@@ -284,6 +286,20 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
         call_wall = float(ks[np.argmax(gc)]) if gc.max() > 0 else None
         put_wall = float(ks[np.argmax(gp)]) if gp.max() > 0 else None
 
+    # ==========================================
+    # NUEVO: CÁLCULO DEL NET GEX EN LOS MUROS
+    # ==========================================
+    net_gex_cw = None
+    net_gex_pw = None
+    
+    if call_wall is not None:
+        idx_cw = np.where(ks == call_wall)[0][0]
+        net_gex_cw = gc[idx_cw] - gp[idx_cw]
+        
+    if put_wall is not None:
+        idx_pw = np.where(ks == put_wall)[0][0]
+        net_gex_pw = gc[idx_pw] - gp[idx_pw]
+
     t_i = (_phi(D1) / (spot * IV * G)) ** 2
     S_ = np.zeros(len(K))
     escala = np.ones(len(K))
@@ -325,23 +341,34 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     return {
         "ticker": ticker, "dte": rango_dte, "spot": spot,
         "call_wall": call_wall, "put_wall": put_wall, "flip": flip,
-        "net_gex": net_gex,
+        "net_gex": net_gex, "net_gex_cw": net_gex_cw, "net_gex_pw": net_gex_pw
     }
 
 def formatear_mensaje(resultados, ahora_ny):
     if not resultados:
         return None
     lineas = [
-        "<b>GEX Monitor v14</b>",
+        "<b>GEX Monitor</b>",
         f"Día: {ahora_ny:%Y-%m-%d}",
         f"Hora: {ahora_ny:%H:%M} NY",
         "",
     ]
     for r in resultados:
+        # Formateo del Call Wall con Net GEX
         cw = f"${r['call_wall']:.2f}" if r["call_wall"] is not None else "N/A"
+        if r.get("net_gex_cw") is not None:
+            cw += f" (Net GEX: {r['net_gex_cw']/1_000_000:+.1f}M)"
+            
+        # Formateo del Put Wall con Net GEX
         pw = f"${r['put_wall']:.2f}" if r["put_wall"] is not None else "N/A"
+        if r.get("net_gex_pw") is not None:
+            pw += f" (Net GEX: {r['net_gex_pw']/1_000_000:+.1f}M)"
+            
         fl = f"${r['flip']:.2f}" if r["flip"] is not None else "N/A"
+        
+        # Cambiado a 2 decimales (+.2f) según tu ejemplo
         gex_m = r["net_gex"] / 1_000_000
+        
         if r["net_gex"] > 0:
             gamma_txt = "🟢 Gamma positivo"
         elif r["net_gex"] < 0:
@@ -356,7 +383,7 @@ def formatear_mensaje(resultados, ahora_ny):
             f"Call wall: {cw}\n"
             f"Put wall: {pw}\n"
             f"Flip: {fl}\n"
-            f"Net GEX: {gex_m:+.1f}M\n"
+            f"Net GEX: {gex_m:+.2f}M\n"
             f"{gamma_txt}\n"
         )
     return "\n".join(lineas).strip()
