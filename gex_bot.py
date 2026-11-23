@@ -21,7 +21,6 @@ NYSE_TZ = "America/New_York"
 MULT_CONTRATO = 100
 PCT_MOV = 0.01
 DATO_MAX_RETRASO_MIN = 45   # Cboe ya trae ~15 min; más que esto = dato no actualizado
-DESALINEO_AVISO = 0.003     # Aviso si el subyacente implícito difiere del spot más de 0.3%
 IV_MAX = 3.0
 OCC_REGEX = re.compile(r"^(?P<root>[A-Z]{1,6}\d?)(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$")
 HEADERS = {
@@ -458,8 +457,6 @@ def formatear_mensaje(resultados, ahora_ny):
         if not r["fresco"]:
             ret = _txt_retraso(r["retraso"]) if r["retraso"] is not None else "?"
             bloque += f"⚠️ Dato no actualizado (retraso {ret})\n"
-        if abs(r["desalineo"]) > DESALINEO_AVISO:
-            bloque += f"⚠️ Subyacente en opciones ${r['s_ref']:.2f} ({r['desalineo']:+.1%} vs spot)\n"
         lineas.append(bloque)
     if hay_disputa:
         lineas.append("⚠️ Muro disputado: en ese strike domina el lado contrario.")
