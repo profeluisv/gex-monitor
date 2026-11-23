@@ -1,9 +1,13 @@
 name: GEX Monitor NY
 
 on:
-  schedule:
-    - cron: '33 13-21 * * 1-5'
   workflow_dispatch:
+    inputs:
+      forzar:
+        description: 'Forzar envío fuera de sesión NY'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   run-gex:
@@ -23,7 +27,7 @@ jobs:
 
       - name: Ejecutar GEX Monitor
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ "${{ inputs.forzar }}" = "true" ]; then
             python gex_bot.py --forzar
           else
             python gex_bot.py
