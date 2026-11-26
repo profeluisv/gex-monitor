@@ -1,4 +1,4 @@
-# GEX MONITOR v15 - GitHub Actions + Telegram
+# GEX MONITOR v16 - GitHub Actions + Telegram
 import re
 import sys
 import time
@@ -11,7 +11,7 @@ import requests
 from curl_cffi import requests as cffi_requests
 
 # Configuración
-TICKERS = ["SPY", "QQQ", "GLD", "USO", "IBIT"]
+TICKERS = ["SPX", "SPY", "QQQ", "GLD", "USO", "IBIT"]
 TARGET_DTE = 1
 TOKEN = "8624586813:AAE3Vvh-ic3WIddMJI-b4X2QF6Ii8AP2VD4"
 CHAT_ID = "@gex_monitor"
@@ -22,6 +22,8 @@ MULT_CONTRATO = 100
 PCT_MOV = 0.01
 DATO_MAX_RETRASO_MIN = 45   # Cboe ya trae ~15 min; más que esto = dato no actualizado
 IV_MAX = 3.0
+CBOE_SYMBOL = {"SPX": "_SPX"}
+CBOE_ROOTS = {"SPX": {"SPX", "SPXW"}}
 OCC_REGEX = re.compile(r"^(?P<root>[A-Z]{1,6}\d?)(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$")
 HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -124,7 +126,8 @@ def _txt_retraso(m):
     return f"{m / 1440:.1f} días"
 
 def descargar_cadena(ticker, reintentos=3):
-    url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{ticker}.json"
+    simbolo = CBOE_SYMBOL.get(ticker.upper(), ticker.upper())
+    url = f"https://cdn.cboe.com/api/global/delayed_quotes/options/{simbolo}.json"
     ultimo_error = None
     for i in range(reintentos):
         try:
@@ -249,11 +252,12 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     _, abre, _ = horario_hoy(ahora)
     ts_dato = hora_dato(payload)
 
+    raices_validas = CBOE_ROOTS.get(ticker, {ticker})
     exp_cache = {}
     parsed = []
     for opt in options:
         m = OCC_REGEX.match(str(opt.get("option", "")))
-        if not m or m.group("root") != ticker:
+        if not m or m.group("root") not in raices_validas:
             continue
         try:
             exp = datetime.strptime(m.group("date"), "%y%m%d").date()
@@ -417,7 +421,7 @@ def formatear_mensaje(resultados, ahora_ny):
     if not resultados:
         return None
     lineas = [
-        "<b>GEX Monitor v15</b>",
+        "<b>GEX Monitor v16</b>",
         f"Día: {ahora_ny:%Y-%m-%d}",
         f"Hora: {ahora_ny:%H:%M} NY",
         "",
