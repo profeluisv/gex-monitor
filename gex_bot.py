@@ -295,12 +295,12 @@ def formatear_mensaje(res_list, ahora_ny):
                 hay_disp = hay_disp or dvc or dvp
             else:
                 vcw = vpw = vnet = "N/A"
-            b = (f"<b>Ticker: {r['ticker']}</b>\nDTE: {r['dte']}\nSpot: ${r['spot']:.2f}\n"
+            b = (f"<b>Ticker: {r['ticker']}</b>\nDTE: {r['dte']}\n⬛ Spot: ${r['spot']:.2f}\n"
                  f"🟩 Call wall:\nOI: {cw}\nVolumen: {vcw}\n🟥 Put wall:\nOI: {pw}\nVolumen: {vpw}\n"
-                 f"Flip: {fl}\nNet GEX:\nOI: {_fm(r['net_gex'])} {_ico(r['net_gex'])}\nVolumen: {vnet}\n")
+                 f"🟦 Flip: {fl}\nNet GEX:\nOI: {_fm(r['net_gex'])} {_ico(r['net_gex'])}\nVolumen: {vnet}\n")
         else:
-            b = (f"<b>Ticker: {r['ticker']}</b>\nDTE: {r['dte']}\nSpot: ${r['spot']:.2f}\n"
-                 f"Call wall: {cw}\nPut wall: {pw}\nFlip: {fl}\nNet GEX: {_fm(r['net_gex'])}\n{_reg(r['net_gex'])}\n")
+            b = (f"<b>Ticker: {r['ticker']}</b>\nDTE: {r['dte']}\n⬛ Spot: ${r['spot']:.2f}\n"
+                 f"🟩 Call wall: {cw}\n🟥 Put wall: {pw}\n🟦 Flip: {fl}\nNet GEX: {_fm(r['net_gex'])}\n{_reg(r['net_gex'])}\n")
         if not r["fresco"]:
             b += f"⚠️ Dato no actualizado (retraso {_txt_ret(r['retraso']) if r['retraso'] is not None else '?'})\n"
         lineas.append(b)
