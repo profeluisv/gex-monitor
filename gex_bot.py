@@ -1,4 +1,4 @@
-# GEX MONITOR v16 - GitHub Actions + Telegram
+# GEX MONITOR v17 - GitHub Actions + Telegram (SPX dual OI + Volumen)
 import re
 import sys
 import time
@@ -190,16 +190,16 @@ def hora_dato(payload):
         return t.tz_convert(NYSE_TZ)
     return None
 
-def subyacente_implicito(spot, K, EXP, SG, BID, ASK):
+def subyacente_implicito(spot, K, GRP, SG, BID, ASK):
     # Paridad put-call: F = K + C - P (mid). Mediana de 5 strikes cercanos de menor spread.
     q = {}
-    for k, e, sg, b, a in zip(K, EXP, SG, BID, ASK):
+    for k, g, sg, b, a in zip(K, GRP, SG, BID, ASK):
         if np.isfinite(b) and np.isfinite(a) and b > 0 and a >= b:
-            q[(k, e, sg > 0)] = ((a + b) / 2.0, a - b)
+            q[(k, g, sg > 0)] = ((a + b) / 2.0, a - b)
     est = []
-    for (k, e, call), (mc, sc) in q.items():
-        if call and (k, e, False) in q:
-            mp, sp = q[(k, e, False)]
+    for (k, g, call), (mc, sc) in q.items():
+        if call and (k, g, False) in q:
+            mp, sp = q[(k, g, False)]
             est.append((abs(k - spot), sc + sp, k + mc - mp))
     if len(est) < 3:
         return None
@@ -220,19 +220,57 @@ def calibrar_t(s, iv, g, d, es_call):
     t = t[np.isfinite(t) & (t > 0)]
     return float(np.median(t)) if len(t) else None
 
-def iv_otm(K, EXP, SG, IV, s_ref):
-    # Un solo IV por strike y vencimiento: el del lado OTM (más líquido, spread menor).
+def iv_otm(K, GRP, SG, IV, s_ref):
+    # Un solo IV por strike y grupo (fecha, raíz): el del lado OTM.
     por_strike = {}
-    for k, e, sg, iv in zip(K, EXP, SG, IV):
-        por_strike.setdefault((k, e), {})[sg > 0] = iv
+    for k, g, sg, iv in zip(K, GRP, SG, IV):
+        por_strike.setdefault((k, g), {})[sg > 0] = iv
     out = np.empty(len(K))
-    for n, (k, e, sg) in enumerate(zip(K, EXP, SG)):
-        lados = por_strike[(k, e)]
+    for n, (k, g, sg) in enumerate(zip(K, GRP, SG)):
+        lados = por_strike[(k, g)]
         if True in lados and False in lados:
             out[n] = lados[True] if k >= s_ref else lados[False]
         else:
             out[n] = lados[sg > 0]
     return out
+
+def _calcular_muros(ks, idx_k, es_c, gex_vec):
+    gc, gneg = np.zeros(len(ks)), np.zeros(len(ks))
+    np.add.at(gc, idx_k[es_c], gex_vec[es_c])
+    np.add.at(gneg, idx_k[~es_c], gex_vec[~es_c])
+    gp = -gneg
+
+    call_wall = put_wall = None
+    if gc.max() > 0 and gp.max() > 0:
+        ic, ip = int(np.argmax(gc)), int(np.argmax(gp))
+        if ks[ic] > ks[ip]:
+            call_wall, put_wall = float(ks[ic]), float(ks[ip])
+        else:  # inversión: pareja Put < Call de mayor GEX total
+            mejor = None
+            m_p = ks < ks[ic]
+            if m_p.any() and gp[m_p].max() > 0:
+                j = int(np.flatnonzero(m_p)[np.argmax(gp[m_p])])
+                mejor = (gc[ic] + gp[j], float(ks[ic]), float(ks[j]))
+            m_c = ks > ks[ip]
+            if m_c.any() and gc[m_c].max() > 0:
+                j = int(np.flatnonzero(m_c)[np.argmax(gc[m_c])])
+                cand = (gc[j] + gp[ip], float(ks[j]), float(ks[ip]))
+                if mejor is None or cand[0] > mejor[0]:
+                    mejor = cand
+            if mejor is not None:
+                call_wall, put_wall = mejor[1], mejor[2]
+    else:
+        call_wall = float(ks[np.argmax(gc)]) if gc.max() > 0 else None
+        put_wall = float(ks[np.argmax(gp)]) if gp.max() > 0 else None
+
+    net_cw = net_pw = None
+    if call_wall is not None:
+        i = int(np.searchsorted(ks, call_wall))
+        net_cw = float(gc[i] - gp[i])
+    if put_wall is not None:
+        i = int(np.searchsorted(ks, put_wall))
+        net_pw = float(gc[i] - gp[i])
+    return call_wall, put_wall, net_cw, net_pw, float(gex_vec.sum())
 
 def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     ticker = ticker.upper()
@@ -268,14 +306,18 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
         if exp not in exp_cache:
             exp_cache[exp] = max(0, _nyse_valid_days_count(hoy, exp) - 1)
 
-        iv, oi = _num(opt.get("iv")), _num(opt.get("open_interest"))
-        if iv is None or oi is None or not (0 < iv <= IV_MAX) or oi <= 0:
+        iv = _num(opt.get("iv"))
+        oi_raw = _num(opt.get("open_interest"))
+        vol_raw = _num(opt.get("volume"))
+        oi = 0.0 if (oi_raw is None or oi_raw < 0) else oi_raw
+        vol = 0.0 if (vol_raw is None or vol_raw < 0) else vol_raw
+        if iv is None or not (0 < iv <= IV_MAX) or (oi <= 0 and vol <= 0):
             continue
         g, d = _num(opt.get("gamma")), _num(opt.get("delta"))
         b, a = _num(opt.get("bid")), _num(opt.get("ask"))
         parsed.append({
-            "exp": exp, "dte": exp_cache[exp], "call": m.group("cp") == "C",
-            "strike": int(m.group("strike")) / 1000.0, "iv": iv, "oi": oi,
+            "exp": exp, "root": m.group("root"), "dte": exp_cache[exp], "call": m.group("cp") == "C",
+            "strike": int(m.group("strike")) / 1000.0, "iv": iv, "oi": oi, "vol": vol,
             "g": np.nan if g is None else g, "d": np.nan if d is None else d,
             "bid": np.nan if b is None else b, "ask": np.nan if a is None else a,
         })
@@ -298,30 +340,35 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     K = np.array([p["strike"] for p in sel])
     IV = np.array([p["iv"] for p in sel])
     OI = np.array([p["oi"] for p in sel])
+    VOL = np.array([p["vol"] for p in sel])
     SG = np.array([1.0 if p["call"] else -1.0 for p in sel])
-    EXP = np.array([p["exp"].toordinal() for p in sel])
     DTE = np.array([p["dte"] for p in sel])
     GV = np.array([p["g"] for p in sel])
     DV = np.array([p["d"] for p in sel])
     BID = np.array([p["bid"] for p in sel])
     ASK = np.array([p["ask"] for p in sel])
 
+    # Agrupación por (fecha, raíz) para no mezclar SPX AM y SPXW PM en el 3er viernes
+    grps = sorted({(p["exp"].toordinal(), p["root"]) for p in sel})
+    grp_id = {g: idx for idx, g in enumerate(grps)}
+    GRP = np.array([grp_id[(p["exp"].toordinal(), p["root"])] for p in sel])
+
     # Subyacente implícito en las cotizaciones (el que usa Cboe para IV y griegas)
-    s_ref = subyacente_implicito(spot, K, EXP, SG, BID, ASK)
+    s_ref = subyacente_implicito(spot, K, GRP, SG, BID, ASK)
     if s_ref is None or not np.isfinite(s_ref) or abs(s_ref / spot - 1) > 0.05:
         s_ref = spot
     desalineo = s_ref / spot - 1
 
-    # T por vencimiento (calibrado en ATM) y sigma*sqrt(T) por contrato
-    IVU = iv_otm(K, EXP, SG, IV, s_ref)
+    # T por grupo (calibrado en ATM) y sigma*sqrt(T) por contrato
+    IVU = iv_otm(K, GRP, SG, IV, s_ref)
     T_map = {}
-    for e in np.unique(EXP):
-        mk = EXP == e
+    for g_idx in np.unique(GRP):
+        mk = GRP == g_idx
         t = calibrar_t(s_ref, IVU[mk], GV[mk], DV[mk], SG[mk] > 0)
         if t is None or not (1e-6 < t < 0.1):
             t = max(int(DTE[mk][0]), 0.5) / 252.0
-        T_map[e] = t
-    S_ = IVU * np.sqrt(np.array([T_map[e] for e in EXP]))
+        T_map[g_idx] = t
+    S_ = IVU * np.sqrt(np.array([T_map[g_idx] for g_idx in GRP]))
     if not (np.isfinite(S_).all() and (S_ > 0).all()):
         log(f"Datos corruptos (IV/T) en {ticker}.")
         return None
@@ -335,53 +382,24 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
         precios = np.asarray(precios, dtype=float)
         return (gamma_modelo(precios) * (OI * SG * MULT_CONTRATO)[None, :]).sum(axis=1) * precios ** 2 * PCT_MOV
 
-    # GEX en USD por cada 1% de movimiento
+    # GEX en USD por cada 1% de movimiento (OI y, en SPX, también Volumen)
     k_usd = MULT_CONTRATO * s_ref ** 2 * PCT_MOV
-    gex_i = gamma_modelo([s_ref])[0] * OI * SG * k_usd
-    net_gex = float(gex_i.sum())
-
-    # Muros por strike (calls +, puts -)
+    gex_base = gamma_modelo([s_ref])[0] * SG * k_usd
     ks = np.unique(K)
     idx_k = np.searchsorted(ks, K)
     es_c = SG > 0
-    gc, gneg = np.zeros(len(ks)), np.zeros(len(ks))
-    np.add.at(gc, idx_k[es_c], gex_i[es_c])
-    np.add.at(gneg, idx_k[~es_c], gex_i[~es_c])
-    gp = -gneg
 
-    call_wall = put_wall = None
-    if gc.max() > 0 and gp.max() > 0:
-        ic, ip = int(np.argmax(gc)), int(np.argmax(gp))
-        if ks[ic] > ks[ip]:
-            call_wall, put_wall = float(ks[ic]), float(ks[ip])
-        else:  # inversión: pareja Put < Call de mayor GEX total
-            mejor = None
-            m_p = ks < ks[ic]
-            if m_p.any() and gp[m_p].max() > 0:
-                j = int(np.flatnonzero(m_p)[np.argmax(gp[m_p])])
-                mejor = (gc[ic] + gp[j], float(ks[ic]), float(ks[j]))
-            m_c = ks > ks[ip]
-            if m_c.any() and gc[m_c].max() > 0:
-                j = int(np.flatnonzero(m_c)[np.argmax(gc[m_c])])
-                cand = (gc[j] + gp[ip], float(ks[j]), float(ks[ip]))
-                if mejor is None or cand[0] > mejor[0]:
-                    mejor = cand
-            if mejor is not None:
-                call_wall, put_wall = mejor[1], mejor[2]
-    else:
-        call_wall = float(ks[np.argmax(gc)]) if gc.max() > 0 else None
-        put_wall = float(ks[np.argmax(gp)]) if gp.max() > 0 else None
+    call_wall, put_wall, net_cw, net_pw, net_gex = _calcular_muros(ks, idx_k, es_c, gex_base * OI)
 
-    # Net GEX en cada muro = GEX calls - GEX puts en ese strike
-    net_cw = net_pw = None
-    if call_wall is not None:
-        i = int(np.searchsorted(ks, call_wall))
-        net_cw = float(gc[i] - gp[i])
-    if put_wall is not None:
-        i = int(np.searchsorted(ks, put_wall))
-        net_pw = float(gc[i] - gp[i])
+    vol_data = None
+    if ticker == "SPX" and VOL.sum() > 0:
+        vcw, vpw, vnet_cw, vnet_pw, vnet_gex = _calcular_muros(ks, idx_k, es_c, gex_base * VOL)
+        vol_data = {
+            "call_wall": vcw, "put_wall": vpw,
+            "net_cw": vnet_cw, "net_pw": vnet_pw, "net_gex": vnet_gex,
+        }
 
-    # Gamma Flip (cruce por cero de la misma curva)
+    # Gamma Flip (cruce por cero de la curva OI)
     flip = None
     if len(ks) > 1:
         v = curva(ks)
@@ -414,50 +432,89 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
     return {
         "ticker": ticker, "dte": rango_dte, "spot": spot, "s_ref": s_ref, "desalineo": desalineo,
         "call_wall": call_wall, "put_wall": put_wall, "net_cw": net_cw, "net_pw": net_pw,
-        "flip": flip, "net_gex": net_gex, "ts_dato": ts_dato, "retraso": retraso, "fresco": fresco,
+        "flip": flip, "net_gex": net_gex, "vol_data": vol_data,
+        "ts_dato": ts_dato, "retraso": retraso, "fresco": fresco,
     }
+
+def _fmt_muro(precio, net_muro, es_call):
+    if precio is None:
+        return "N/A", False
+    txt = f"${precio:.2f}"
+    disputa = False
+    if net_muro is not None:
+        txt += f" ({_fm(net_muro)})"
+        if (es_call and net_muro < 0) or ((not es_call) and net_muro > 0):
+            txt += " ⚠️"
+            disputa = True
+    return txt, disputa
+
+def _fmt_regimen(net_gex):
+    if net_gex > 0:
+        return "🟢 Gamma positivo"
+    if net_gex < 0:
+        return "🔴 Gamma negativo"
+    return "⚪ Gamma neutro"
+
+def _ico_regimen(net_gex):
+    if net_gex > 0:
+        return "🟢"
+    if net_gex < 0:
+        return "🔴"
+    return "⚪"
 
 def formatear_mensaje(resultados, ahora_ny):
     if not resultados:
         return None
     lineas = [
-        "<b>GEX Monitor v16</b>",
+        "<b>GEX Monitor v17</b>",
         f"Día: {ahora_ny:%Y-%m-%d}",
         f"Hora: {ahora_ny:%H:%M} NY",
         "",
     ]
     hay_disputa = False
     for r in resultados:
-        cw = f"${r['call_wall']:.2f}" if r["call_wall"] is not None else "N/A"
-        pw = f"${r['put_wall']:.2f}" if r["put_wall"] is not None else "N/A"
+        cw, disp_cw = _fmt_muro(r["call_wall"], r["net_cw"], True)
+        pw, disp_pw = _fmt_muro(r["put_wall"], r["net_pw"], False)
         fl = f"${r['flip']:.2f}" if r["flip"] is not None else "N/A"
-        if r["net_cw"] is not None:
-            cw += f" ({_fm(r['net_cw'])})"
-            if r["net_cw"] < 0:
-                cw += " ⚠️"
-                hay_disputa = True
-        if r["net_pw"] is not None:
-            pw += f" ({_fm(r['net_pw'])})"
-            if r["net_pw"] > 0:
-                pw += " ⚠️"
-                hay_disputa = True
-        if r["net_gex"] > 0:
-            gamma_txt = "🟢 Gamma positivo"
-        elif r["net_gex"] < 0:
-            gamma_txt = "🔴 Gamma negativo"
-        else:
-            gamma_txt = "⚪ Gamma neutro"
+        hay_disputa = hay_disputa or disp_cw or disp_pw
 
-        bloque = (
-            f"<b>Ticker: {r['ticker']}</b>\n"
-            f"DTE: {r['dte']}\n"
-            f"Spot: ${r['spot']:.2f}\n"
-            f"Call wall: {cw}\n"
-            f"Put wall: {pw}\n"
-            f"Flip: {fl}\n"
-            f"Net GEX: {_fm(r['net_gex'])}\n"
-            f"{gamma_txt}\n"
-        )
+        if r["ticker"] == "SPX":
+            vd = r.get("vol_data")
+            if vd is not None:
+                vcw, d_vcw = _fmt_muro(vd["call_wall"], vd["net_cw"], True)
+                vpw, d_vpw = _fmt_muro(vd["put_wall"], vd["net_pw"], False)
+                vnet_txt = f"{_fm(vd['net_gex'])} {_ico_regimen(vd['net_gex'])}"
+                hay_disputa = hay_disputa or d_vcw or d_vpw
+            else:
+                vcw = vpw = vnet_txt = "N/A"
+
+            bloque = (
+                f"<b>Ticker: {r['ticker']}</b>\n"
+                f"DTE: {r['dte']}\n"
+                f"Spot: ${r['spot']:.2f}\n"
+                f"🟩 Call wall:\n"
+                f"OI: {cw}\n"
+                f"Volumen: {vcw}\n"
+                f"🟥 Put wall:\n"
+                f"OI: {pw}\n"
+                f"Volumen: {vpw}\n"
+                f"Flip: {fl}\n"
+                f"Net GEX:\n"
+                f"OI: {_fm(r['net_gex'])} {_ico_regimen(r['net_gex'])}\n"
+                f"Volumen: {vnet_txt}\n"
+            )
+        else:
+            bloque = (
+                f"<b>Ticker: {r['ticker']}</b>\n"
+                f"DTE: {r['dte']}\n"
+                f"Spot: ${r['spot']:.2f}\n"
+                f"Call wall: {cw}\n"
+                f"Put wall: {pw}\n"
+                f"Flip: {fl}\n"
+                f"Net GEX: {_fm(r['net_gex'])}\n"
+                f"{_fmt_regimen(r['net_gex'])}\n"
+            )
+
         if not r["fresco"]:
             ret = _txt_retraso(r["retraso"]) if r["retraso"] is not None else "?"
             bloque += f"⚠️ Dato no actualizado (retraso {ret})\n"
@@ -500,27 +557,4 @@ def main():
     for idx, t in enumerate(TICKERS):
         res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
         if res is not None:
-            resultados.append(res)
-        if idx < len(TICKERS) - 1:
-            time.sleep(1.5)
-
-    if not resultados:
-        log("Sin resultados válidos de Cboe.")
-        sys.exit(1)
-
-    if not forzar:
-        frescos = [r for r in resultados if r["fresco"]]
-        if not frescos:
-            log("Datos de Cboe no actualizados. Se omite envío.")
-            return
-        resultados = frescos
-
-    mensaje = formatear_mensaje(resultados, ahora_ny)
-    if mensaje and enviar_telegram(mensaje):
-        log(f"Reporte enviado a {CHAT_ID} ({len(resultados)} tickers).")
-    else:
-        log("No se pudo enviar el reporte a Telegram.")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
+            resultados.ap
