@@ -1,3 +1,8 @@
+# ==============================================================================
+# GEX MONITOR v16.4
+# Lógica de microestructura, cálculo de Gamma y envío a Telegram.
+# Refactorizado para buenas prácticas (Clean Code).
+# ==============================================================================
 import os
 import re
 import sys
