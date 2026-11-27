@@ -23,7 +23,7 @@ jobs:
           python-version: '3.11'
 
       - name: Instalar dependencias
-        run: pip install numpy pandas requests curl_cffi
+        run: pip install numpy pandas requests curl_cffi python-dateutil
 
       - name: Ejecutar GEX Monitor
         run: |
