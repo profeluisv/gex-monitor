@@ -1,4 +1,4 @@
-# GEX MONITOR v16.3.1 - GitHub Actions + Telegram (Niveles ordenados descendente)
+# GEX MONITOR v16.3 - GitHub Actions + Telegram (Niveles ordenados descendente)
 import re, sys, time
 from datetime import datetime, date, timedelta
 from statistics import NormalDist
@@ -16,13 +16,13 @@ ENVIAR_SOLO_EN_SESION = True
 NYSE_TZ = "America/New_York"
 MULT_CONTRATO = 100
 PCT_MOV = 0.01
-DATO_MAX_RETRASO_MIN = 30
-MIN_CIERRE_0DTE = 45
+DATO_MAX_RETRASO_MIN = 45
 IV_MAX = 3.0
 CBOE_SYMBOL = {"SPX": "_SPX"}
 CBOE_ROOTS = {"SPX": {"SPX", "SPXW"}}
 OCC_REGEX = re.compile(r"^(?P<root>[A-Z]{1,6}\d?)(?P<date>\d{6})(?P<cp>[CP])(?P<strike>\d{8})$")
-HEADERS = {"Origin": "https://www.cboe.com", "Referer": "https://www.cboe.com/"}
+HEADERS = {"Accept": "application/json, text/plain, */*", "Accept-Language": "en-US,en;q=0.9",
+           "Origin": "https://www.cboe.com", "Referer": "https://www.cboe.com/"}
 _SESSION = cffi_requests.Session(impersonate="chrome")
 _INV = NormalDist().inv_cdf
 _FER = {}
@@ -67,7 +67,7 @@ def _es_nyse(d): return d.weekday() < 5 and d not in _feriados(d.year)
 def _cierre_hm(d): return (13, 0) if d in (_nth(d.year, 11, 3, 4) + timedelta(days=1), date(d.year, 7, 3), date(d.year, 12, 24)) else (16, 0)
 
 def _valid_days(a, b):
-    c, n = a + timedelta(days=1), 0
+    c, n = a, 0
     while c <= b:
         if _es_nyse(c): n += 1
         c += timedelta(days=1)
@@ -76,7 +76,6 @@ def _valid_days(a, b):
 def _phi(x): return np.exp(-0.5 * x * x) / np.sqrt(2.0 * np.pi)
 def _fm(x):
     a = abs(x)
-    if a >= 1e9: return f"{x / 1e9:+.2f}B"
     return f"{x / 1e6:+.1f}M" if a >= 1e6 else (f"{x / 1e3:+.0f}K" if a >= 1e3 else f"{x:+.0f}")
 def _txt_ret(m): return f"{m:.0f} min" if m < 120 else (f"{m / 60:.1f} h" if m < 2880 else f"{m / 1440:.1f} días")
 def _num(x):
@@ -117,8 +116,8 @@ def estado_sesion(ahora):
     if abre is None or ahora >= cierra: return "cierre"
     return "pre" if ahora < abre else "sesion"
 
-def hora_dato(payload, trades):
-    tr = [t for t in trades if isinstance(t, str) and t.strip()]
+def hora_dato(payload):
+    tr = [t for t in (o.get("last_trade_time") for o in payload["data"]["options"]) if isinstance(t, str) and t.strip()]
     cand = ([(max(tr), NYSE_TZ)] if tr else []) + [(payload.get("timestamp"), "UTC"), (payload["data"].get("last_trade_time"), "UTC")]
     for valor, zona in cand:
         try: t = pd.Timestamp(valor)
@@ -159,8 +158,8 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
 
     ahora = ahora if ahora is not None else pd.Timestamp.now(tz=NYSE_TZ)
     hoy = ahora.date()
-    _, abre, cierra = horario_hoy(ahora)
-    min_cierre = (cierra - ahora).total_seconds() / 60 if cierra is not None and ahora < cierra else None
+    _, abre, _ = horario_hoy(ahora)
+    ts_dato = hora_dato(payload)
     raices = CBOE_ROOTS.get(ticker, {ticker})
     exp_cache, parsed = {}, []
 
@@ -170,12 +169,12 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
         try: exp = datetime.strptime(m.group("date"), "%y%m%d").date()
         except ValueError: continue
         if exp < hoy: continue
-        if exp not in exp_cache: exp_cache[exp] = _valid_days(hoy, exp)
+        if exp not in exp_cache: exp_cache[exp] = max(0, _valid_days(hoy, exp) - 1)
         iv, oi = _num(opt.get("iv")), _num(opt.get("open_interest"))
         if iv is None or oi is None or not (0 < iv <= IV_MAX) or oi <= 0: continue
         g, d, b, a = _num(opt.get("gamma")), _num(opt.get("delta")), _num(opt.get("bid")), _num(opt.get("ask"))
         parsed.append({"exp": exp, "root": m.group("root"), "dte": exp_cache[exp], "call": m.group("cp") == "C",
-                       "strike": int(m.group("strike")) / 1000.0, "iv": iv, "oi": oi, "t": opt.get("last_trade_time"),
+                       "strike": int(m.group("strike")) / 1000.0, "iv": iv, "oi": oi,
                        "g": np.nan if g is None else g, "d": np.nan if d is None else d,
                        "bid": np.nan if b is None else b, "ask": np.nan if a is None else a})
     if not parsed:
@@ -183,11 +182,7 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
 
     dtes = sorted({p["dte"] for p in parsed})
     eleg = [x for x in dtes if x <= target_dte] or [min(dtes, key=lambda x: (abs(x - target_dte), x))]
-    excluido = False
-    if 0 in eleg and len(eleg) > 1 and min_cierre is not None and min_cierre < MIN_CIERRE_0DTE:
-        eleg.remove(0); excluido = True
     sel = [p for p in parsed if p["dte"] in eleg]
-    ts_dato = hora_dato(payload, [p["t"] for p in sel])
     if not any(p["call"] for p in sel) or all(p["call"] for p in sel):
         log(f"Datos incoherentes (calls/puts) para {ticker}."); return None
     d0, d1 = min(p["dte"] for p in sel), max(p["dte"] for p in sel)
@@ -203,6 +198,7 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
 
     s_ref = subyacente_implicito(spot, K, GRP, SG, BID, ASK)
     if s_ref is None or not np.isfinite(s_ref) or abs(s_ref / spot - 1) > 0.05: s_ref = spot
+    desalineo = s_ref / spot - 1
     IVU = iv_otm(K, GRP, SG, IV, s_ref)
     T_map = {}
     for gi in np.unique(GRP):
@@ -269,16 +265,15 @@ def calcular_gex(ticker, target_dte=TARGET_DTE, payload=None, ahora=None):
 
     net_flip = float(gc[int(np.argmin(np.abs(ks - flip)))] - gp[int(np.argmin(np.abs(ks - flip)))]) if flip is not None else None
     retraso = (pd.Timestamp(ahora).tz_convert(NYSE_TZ) - ts_dato).total_seconds() / 60 if ts_dato is not None else None
-    fresco = retraso is not None and -2 <= retraso <= DATO_MAX_RETRASO_MIN and (abre is None or ts_dato >= abre)
-    return {"ticker": ticker, "dte": rango_dte, "spot": spot,
+    fresco = retraso is not None and retraso <= DATO_MAX_RETRASO_MIN and (abre is None or ts_dato >= abre)
+    return {"ticker": ticker, "dte": rango_dte, "spot": spot, "s_ref": s_ref, "desalineo": desalineo,
             "call_wall": cw, "put_wall": pw, "net_cw": net_cw, "net_pw": net_pw,
-            "flip": flip, "net_flip": net_flip, "net_gex": net_gex, "ts_dato": ts_dato, "retraso": retraso, "fresco": fresco,
-            "excluido_0dte": excluido, "min_cierre": min_cierre}
+            "flip": flip, "net_flip": net_flip, "net_gex": net_gex, "ts_dato": ts_dato, "retraso": retraso, "fresco": fresco}
 
 def formatear_mensaje(resultados, ahora_ny, sin_datos=None):
     sin_datos = sin_datos or []
     if not resultados and not sin_datos: return None
-    lineas, hay_disputa = ["<b>GEX Monitor v16.3.1</b>", f"Día: {ahora_ny:%Y-%m-%d}", f"Hora: {ahora_ny:%H:%M} NY", ""], False
+    lineas, hay_disputa = ["<b>GEX Monitor v16.3</b>", f"Día: {ahora_ny:%Y-%m-%d}", f"Hora: {ahora_ny:%H:%M} NY", ""], False
     for r in resultados:
         cw = f"${r['call_wall']:.2f}" if r["call_wall"] is not None else "N/A"
         pw = f"${r['put_wall']:.2f}" if r["put_wall"] is not None else "N/A"
@@ -301,7 +296,6 @@ def formatear_mensaje(resultados, ahora_ny, sin_datos=None):
         niveles.sort(key=lambda x: (x[0] is not None, x[0] if x[0] is not None else 0.0, x[1]), reverse=True)
 
         bloque = f"<b>Ticker: {r['ticker']}</b>\nDTE: {r['dte']}\n\n" + "\n".join(x[2] for x in niveles) + f"\nNet GEX:\n{_fm(r['net_gex'])}\n{gamma_txt}\n"
-        if r["excluido_0dte"]: bloque += f"⏳ 0DTE excluido (vence en {r['min_cierre']:.0f} min)\n"
         if not r["fresco"]:
             bloque += f"⚠️ Dato no actualizado (retraso {_txt_ret(r['retraso']) if r['retraso'] is not None else '?'})\n"
         lineas.append(bloque)
@@ -332,8 +326,7 @@ def main():
 
     resultados, sin_datos = [], []
     for idx, t in enumerate(TICKERS):
-        try: res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
-        except Exception as e: log(f"Fallo {t}: {e!r}"); res = None
+        res = calcular_gex(t, TARGET_DTE, ahora=ahora_ny)
         if res is None: sin_datos.append(t)
         else: resultados.append(res)
         if idx < len(TICKERS) - 1: time.sleep(1.5)
